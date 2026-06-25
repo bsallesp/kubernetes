@@ -49,7 +49,7 @@ type Scope interface {
 	// AddContainer adds pod to Manager for tracking
 	AddContainer(pod *v1.Pod, container *v1.Container, containerID string)
 	// RemoveContainer removes pod from Manager tracking
-	RemoveContainer(containerID string) error
+	RemoveContainer(logger klog.Logger, containerID string) error
 	// Store is the interface for storing pod topology hints
 	Store
 }
@@ -111,11 +111,7 @@ func (s *scope) AddContainer(pod *v1.Pod, container *v1.Container, containerID s
 
 // It would be better to implement this function in topologymanager instead of scope
 // but topologymanager do not track mapping anymore
-func (s *scope) RemoveContainer(containerID string) error {
-	// Use context.TODO() because we currently do not have a proper context to pass in.
-	// Replace this with an appropriate context when refactoring this function to accept a context parameter.
-	ctx := context.TODO()
-	logger := klog.FromContext(ctx)
+func (s *scope) RemoveContainer(logger klog.Logger, containerID string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -140,9 +136,9 @@ func (s *scope) RemoveContainer(containerID string) error {
 	return nil
 }
 
-func (s *scope) admitPolicyNone(pod *v1.Pod) lifecycle.PodAdmitResult {
+func (s *scope) admitPolicyNone(ctx context.Context, pod *v1.Pod) lifecycle.PodAdmitResult {
 	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
-		err := s.allocateAlignedResources(pod, &container)
+		err := s.allocateAlignedResources(ctx, pod, &container)
 		if err != nil {
 			return admission.GetPodAdmitResult(err)
 		}
@@ -152,9 +148,9 @@ func (s *scope) admitPolicyNone(pod *v1.Pod) lifecycle.PodAdmitResult {
 
 // It would be better to implement this function in topologymanager instead of scope
 // but topologymanager does not track providers anymore
-func (s *scope) allocateAlignedResources(pod *v1.Pod, container *v1.Container) error {
+func (s *scope) allocateAlignedResources(ctx context.Context, pod *v1.Pod, container *v1.Container) error {
 	for _, provider := range s.hintProviders {
-		err := provider.Allocate(pod, container)
+		err := provider.Allocate(ctx, pod, container)
 		if err != nil {
 			return err
 		}
@@ -162,9 +158,9 @@ func (s *scope) allocateAlignedResources(pod *v1.Pod, container *v1.Container) e
 	return nil
 }
 
-func (s *scope) allocatePodAlignedResources(pod *v1.Pod) error {
+func (s *scope) allocatePodAlignedResources(logger klog.Logger, pod *v1.Pod) error {
 	for _, provider := range s.hintProviders {
-		err := provider.AllocatePod(pod)
+		err := provider.AllocatePod(logger, pod)
 		if err != nil {
 			return err
 		}

@@ -214,7 +214,7 @@ const (
 // in the ResourceSlice by the DRA driver.
 // +k8s:supportsSubresource="/status"
 type DeviceTaintRule struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:""`
 	// Standard object metadata
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
@@ -332,6 +332,9 @@ type DeviceTaintRuleStatus struct {
 	// +listMapKey=type
 	// +patchStrategy=merge
 	// +patchMergeKey=type
+	// +k8s:alpha(since: "1.37")=+k8s:optional
+	// +k8s:alpha(since: "1.37")=+k8s:listType=map
+	// +k8s:alpha(since: "1.37")=+k8s:listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
 }
 
@@ -346,7 +349,7 @@ const DeviceTaintConditionEvictionInProgress = "EvictionInProgress"
 
 // DeviceTaintRuleList is a collection of DeviceTaintRules.
 type DeviceTaintRuleList struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:""`
 	// Standard list metadata
 	// +optional
 	metav1.ListMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
@@ -365,7 +368,7 @@ type DeviceTaintRuleList struct {
 // based on the provided filters. Once status is set, the request is considered complete and will not be reprocessed.
 // Users should delete and recreate requests to get updated information.
 type ResourcePoolStatusRequest struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:""`
 	// Standard object metadata
 	// +required
 	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
@@ -467,6 +470,8 @@ type ResourcePoolStatusRequestStatus struct {
 	// +patchStrategy=merge
 	// +patchMergeKey=type
 	// +k8s:maxItems=10
+	// +k8s:alpha(since: "1.37")=+k8s:listType=map
+	// +k8s:alpha(since: "1.37")=+k8s:listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,3,rep,name=conditions"`
 }
 
@@ -574,7 +579,7 @@ const ResourcePoolStatusRequestConditionFailed = "Failed"
 
 // ResourcePoolStatusRequestList is a collection of ResourcePoolStatusRequests.
 type ResourcePoolStatusRequestList struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:""`
 	// Standard list metadata
 	// +optional
 	metav1.ListMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`

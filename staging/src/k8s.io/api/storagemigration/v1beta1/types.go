@@ -29,7 +29,7 @@ import (
 // storage version.
 // +k8s:supportsSubresource="/status"
 type StorageVersionMigration struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:""`
 	// Standard object metadata.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
 	// +optional
@@ -69,6 +69,9 @@ type StorageVersionMigrationStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	// +optional
+	// +k8s:alpha(since: "1.37")=+k8s:optional
+	// +k8s:alpha(since: "1.37")=+k8s:listType=map
+	// +k8s:alpha(since: "1.37")=+k8s:listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
 	// ResourceVersion to compare with the GC cache for performing the migration.
 	// This is the current resource version of given group, version and resource when
@@ -81,7 +84,7 @@ type StorageVersionMigrationStatus struct {
 
 // StorageVersionMigrationList is a collection of storage version migrations.
 type StorageVersionMigrationList struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:""`
 
 	// Standard list metadata
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata

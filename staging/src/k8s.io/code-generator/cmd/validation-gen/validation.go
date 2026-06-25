@@ -49,7 +49,7 @@ func mkPkgNames(pkg string, names ...string) []types.Name {
 var (
 	fieldPkg            = "k8s.io/apimachinery/pkg/util/validation/field"
 	fieldPkgSymbols     = mkPkgNames(fieldPkg, "ErrorList", "InternalError", "Path")
-	fmtPkgSymbols       = mkPkgNames("fmt", "Errorf")
+	fmtPkgSymbols       = mkPkgNames("fmt", "Errorf", "Fprintln")
 	safePkg             = "k8s.io/apimachinery/pkg/api/safe"
 	safePkgSymbols      = mkPkgNames(safePkg, "Field", "Cast", "Value")
 	operationPkg        = "k8s.io/apimachinery/pkg/api/operation"
@@ -649,6 +649,24 @@ func (td *typeDiscoverer) verifySupportedType(t *types.Type) error {
 	return nil
 }
 
+// resolveFieldElemNode returns the element node for a slice/map field, falling
+// back to the type cache when the field type's elem child is not yet wired up
+// (a recursive type still under construction).
+func (td *typeDiscoverer) resolveFieldElemNode(child *childNode, elemType *types.Type) *typeNode {
+	if child.node != nil && child.node.elem != nil {
+		return child.node.elem.node
+	}
+	return td.typeNodes[elemType]
+}
+
+// resolveFieldKeyNode is resolveFieldElemNode for a map's key.
+func (td *typeDiscoverer) resolveFieldKeyNode(child *childNode, keyType *types.Type) *typeNode {
+	if child.node != nil && child.node.key != nil {
+		return child.node.key.node
+	}
+	return td.typeNodes[keyType]
+}
+
 // discoverStruct walks a struct type recursively.
 func (td *typeDiscoverer) discoverStruct(thisNode *typeNode, fldPath *field.Path) error {
 	var fields []*childNode
@@ -751,7 +769,7 @@ func (td *typeDiscoverer) discoverStruct(thisNode *typeNode, fldPath *field.Path
 		switch childType.Kind {
 		case types.Slice:
 			// Validate each value of a list field.
-			if elemNode := child.node.elem.node; elemNode == nil {
+			if elemNode := td.resolveFieldElemNode(child, childType.Elem); elemNode == nil {
 				if !child.fieldValidations.OpaqueValType {
 					return fmt.Errorf("%v: value type %v is in a non-included package; "+
 						"either add this package to validation-gen's --readonly-pkg flag, "+
@@ -783,7 +801,7 @@ func (td *typeDiscoverer) discoverStruct(thisNode *typeNode, fldPath *field.Path
 			}
 		case types.Map:
 			// Validate each key of a map field.
-			if keyNode := child.node.key.node; keyNode == nil {
+			if keyNode := td.resolveFieldKeyNode(child, childType.Key); keyNode == nil {
 				if !child.fieldValidations.OpaqueKeyType {
 					return fmt.Errorf("%v: key type %v is in a non-included package; "+
 						"either add this package to validation-gen's --readonly-pkg flag, "+
@@ -814,7 +832,7 @@ func (td *typeDiscoverer) discoverStruct(thisNode *typeNode, fldPath *field.Path
 				}
 			}
 			// Validate each value of a map field.
-			if elemNode := child.node.elem.node; elemNode == nil {
+			if elemNode := td.resolveFieldElemNode(child, childType.Elem); elemNode == nil {
 				if !child.fieldValidations.OpaqueValType {
 					return fmt.Errorf("%v: value type %v is in a non-included package; "+
 						"either add this package to validation-gen's --readonly-pkg flag, "+
@@ -983,6 +1001,16 @@ func (g *genValidations) hasValidationsImpl(n *typeNode, seen map[*typeNode]bool
 // emitRegisterFunction emits the type-registration logic for validation
 // functions.
 func (g *genValidations) emitRegisterFunction(c *generator.Context, schemeRegistry types.Name, sw *generator.SnippetWriter) {
+	var targetTypes []*types.Type
+	for _, rootType := range g.rootTypes {
+		if g.hasValidations(g.discovered.typeNodes[rootType]) {
+			targetTypes = append(targetTypes, rootType)
+		}
+	}
+	if len(targetTypes) == 0 {
+		return
+	}
+
 	scheme := c.Universe.Type(schemeRegistry)
 	schemePtr := &types.Type{
 		Kind: types.Pointer,
@@ -994,11 +1022,7 @@ func (g *genValidations) emitRegisterFunction(c *generator.Context, schemeRegist
 	sw.Do("// RegisterValidations adds validation functions to the given scheme.\n", nil)
 	sw.Do("// Public to allow building arbitrary schemes.\n", nil)
 	sw.Do("func RegisterValidations(scheme $.|raw$) error {\n", schemePtr)
-	for _, rootType := range g.rootTypes {
-		if !g.hasValidations(g.discovered.typeNodes[rootType]) {
-			continue
-		}
-
+	for _, rootType := range targetTypes {
 		node := g.discovered.typeNodes[rootType]
 		if node == nil {
 			panic(fmt.Sprintf("found nil node for root-type %v", rootType))

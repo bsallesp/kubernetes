@@ -309,7 +309,7 @@ func (*fakeKubelet) ImageFsStats(context.Context) (*statsapi.FsStats, *statsapi.
 	return nil, nil, nil
 }
 func (*fakeKubelet) RlimitStats() (*statsapi.RlimitStats, error) { return nil, nil }
-func (*fakeKubelet) GetCgroupStats(cgroupName string, updateStats bool) (*statsapi.ContainerStats, *statsapi.NetworkStats, error) {
+func (*fakeKubelet) GetCgroupStats(context.Context, string, bool) (*statsapi.ContainerStats, *statsapi.NetworkStats, error) {
 	return nil, nil, nil
 }
 func (*fakeKubelet) GetCgroupCPUAndMemoryStats(cgroupName string, updateStats bool) (*statsapi.ContainerStats, error) {
@@ -1741,7 +1741,7 @@ func TestWebsocketExecAttach(t *testing.T) {
 
 	errorChan := make(chan error)
 	go func() {
-		errorChan <- exec.StreamWithContext(context.Background(), *options)
+		errorChan <- exec.StreamWithContext(tCtx, *options)
 	}()
 
 	select {

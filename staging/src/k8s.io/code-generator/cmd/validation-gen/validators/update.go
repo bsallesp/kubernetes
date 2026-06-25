@@ -22,6 +22,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/validate"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/code-generator/cmd/validation-gen/util"
 	"k8s.io/gengo/v2/codetags"
 	"k8s.io/gengo/v2/types"
@@ -292,7 +293,8 @@ func generateSliceValidation(listByPath map[string]*listMetadata, context Contex
 	args := append([]any{matchArg}, constraintIdentifierArgs(constraints)...)
 
 	// Use ShortCircuit flag so these run in the same group as +k8s:optional
-	fn := Function(updateTagName, ShortCircuit, updateSliceValidator, args...)
+	fn := Function(updateTagName, ShortCircuit, updateSliceValidator, args...).
+		WithEmits(compoundUpdateEmissions(constraints, false)...)
 	return Validations{Functions: []FunctionGen{fn}}, nil
 }
 
@@ -300,7 +302,8 @@ func generateSliceValidation(listByPath map[string]*listMetadata, context Contex
 // identity, so no list metadata or match function is needed.
 func generateMapValidation(constraints []validate.UpdateConstraint) Validations {
 	// Use ShortCircuit flag so these run in the same group as +k8s:optional
-	fn := Function(updateTagName, ShortCircuit, updateMapValidator, constraintIdentifierArgs(constraints)...)
+	fn := Function(updateTagName, ShortCircuit, updateMapValidator, constraintIdentifierArgs(constraints)...).
+		WithEmits(compoundUpdateEmissions(constraints, true)...)
 	return Validations{Functions: []FunctionGen{fn}}
 }
 
@@ -327,9 +330,47 @@ func emitScalarUpdate(context Context, constraints []validate.UpdateConstraint) 
 		validatorFunc = updateValueByReflectValidator
 	}
 
-	// Use ShortCircuit flag so these run in the same group as +k8s:optional
-	fn := Function(updateTagName, ShortCircuit, validatorFunc, constraintIdentifierArgs(constraints)...)
+	// Use ShortCircuit flag so these run in the same group as +k8s:optional.
+	// Scalar/pointer/struct fields only accept NoSet/NoUnset/NoModify
+	// (validateConstraintsForType rejects the rest), all of which emit
+	// field.Invalid at the field path.
+	fn := Function(updateTagName, ShortCircuit, validatorFunc, constraintIdentifierArgs(constraints)...).
+		WithEmits(Emission{field.ErrorTypeInvalid, "update", ""})
 	return Validations{Functions: []FunctionGen{fn}}
+}
+
+// compoundUpdateEmissions returns the (deduplicated) Emissions UpdateSlice or
+// UpdateMap produces for the given constraints. Order is stable for
+// reproducible codegen. NoModify is rejected for compound types upstream, so
+// only NoSet/NoUnset/NoAddItem/NoRemoveItem are handled here.
+//
+//   - NoSet/NoUnset       -> Invalid at the field path
+//   - NoAddItem           -> Forbidden at fldPath.Index(i)/fldPath.Key(k) ("[*]")
+//   - NoRemoveItem, slice -> Forbidden at fldPath ("")
+//   - NoRemoveItem, map   -> Forbidden at fldPath.Key(k) ("[*]"), shared with NoAddItem
+func compoundUpdateEmissions(constraints []validate.UpdateConstraint, isMap bool) []Emission {
+	var hasInvalid, hasAdd, hasRemove bool
+	for _, c := range constraints {
+		switch c {
+		case validate.NoSet, validate.NoUnset:
+			hasInvalid = true
+		case validate.NoAddItem:
+			hasAdd = true
+		case validate.NoRemoveItem:
+			hasRemove = true
+		}
+	}
+	var out []Emission
+	if hasInvalid {
+		out = append(out, Emission{field.ErrorTypeInvalid, "update", ""})
+	}
+	if hasAdd || (hasRemove && isMap) {
+		out = append(out, Emission{field.ErrorTypeForbidden, "update", "[*]"})
+	}
+	if hasRemove && !isMap {
+		out = append(out, Emission{field.ErrorTypeForbidden, "update", ""})
+	}
+	return out
 }
 
 // constraintIdentifierArgs builds the constraint arguments in deterministic order.

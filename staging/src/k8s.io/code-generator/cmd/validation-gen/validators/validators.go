@@ -70,6 +70,13 @@ type Config struct {
 	// This field MUST NOT be used during init, since other validators may not
 	// be initialized yet.
 	TagValidator TagValidationExtractor
+
+	// InputToPkg maps each input (API types) package to the package into which
+	// validation code is generated for it.  This is the same mapping the
+	// generator uses to locate generated Validate_<Type> functions, and lets
+	// validators reference hand-written functions that live alongside the
+	// generated code (e.g. +k8s:customValidation).
+	InputToPkg map[string]string
 }
 
 // Scope describes where a validation (or potential validation) is located.
@@ -517,6 +524,19 @@ type DeferredGen struct {
 	Callback func() (Validations, error)
 }
 
+// Emission describes the field.Error a runtime validator produces on failure.
+// Must match what the runtime function emits via .WithOrigin(...).
+type Emission struct {
+	Type   field.ErrorType
+	Origin string
+	// PathFragment, when non-empty, is the static field-path component the
+	// runtime validator appends to fldPath before emitting the error (e.g.
+	// "[*]" for Unique, which reports field.Duplicate(fldPath.Index(i), ...)
+	// at the offending element). Used by tools that walk the FunctionGen
+	// tree to reconstruct the path the runtime will emit at.
+	PathFragment string
+}
+
 // FunctionGen describes a function call that should be generated.
 type FunctionGen struct {
 	// TagName is the tag which triggered this function.
@@ -563,6 +583,13 @@ type FunctionGen struct {
 	// StabilityLevelSelfManaged indicates that the function already has stability levels
 	// embedded or handled, and should not be wrapped by levelTagValidator.
 	StabilityLevelSelfManaged bool
+
+	// Emits, when non-empty, declares the field.Errors the runtime validator
+	// produces on failure. Set via WithEmits; empty for wrappers and
+	// non-emitting validators. A single function call may emit errors of
+	// different types and/or at different path fragments (e.g. UpdateSlice
+	// with NoAddItem and NoRemoveItem), so this is a slice.
+	Emits []Emission
 }
 
 // WithTypeArgs returns a derived FunctionGen with type arguments.
@@ -594,6 +621,14 @@ func (fg FunctionGen) WithStabilityLevel(level ValidationStabilityLevel) Functio
 	return fg
 }
 
+// WithEmits returns a new FunctionGen that declares the field.Errors the
+// runtime validator produces on failure. A function may emit more than one
+// distinct (type, path) tuple — pass each as a separate Emission.
+func (fg FunctionGen) WithEmits(emits ...Emission) FunctionGen {
+	fg.Emits = emits
+	return fg
+}
+
 // Variable creates a VariableGen for a given variable name and init value.
 func Variable(variable PrivateVar, initializer any) VariableGen {
 	return VariableGen{
@@ -617,6 +652,11 @@ type VariableGen struct {
 type WrapperFunction struct {
 	Function FunctionGen
 	ObjType  *types.Type
+	// PathFragment, when non-empty, is the static field-path component the
+	// wrapping FunctionGen adds to fldPath before invoking Function (e.g.
+	// "[*]" for slice/map value iteration, ".<name>" for subfield). Used
+	// by tools that walk the FunctionGen tree to reconstruct field paths.
+	PathFragment string
 }
 
 // MultiWrapperFunction describes a function literal which has the fingerprint
@@ -625,6 +665,11 @@ type WrapperFunction struct {
 type MultiWrapperFunction struct {
 	Functions []FunctionGen
 	ObjType   *types.Type
+	// PathFragment, when non-empty, is the static field-path component the
+	// wrapping FunctionGen adds to fldPath before invoking the inner Functions
+	// (e.g. ".<jsonName>" for the discriminated-mode validator). Used by tools
+	// that walk the FunctionGen tree to reconstruct field paths.
+	PathFragment string
 }
 
 // Literal is a literal value that, when used as an argument to a validator,

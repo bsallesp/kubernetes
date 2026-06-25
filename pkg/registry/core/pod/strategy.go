@@ -40,7 +40,6 @@ import (
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	apiserverfeatures "k8s.io/apiserver/pkg/features"
 	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/apiserver/pkg/storage"
@@ -452,15 +451,11 @@ func GetAttrs(obj runtime.Object) (labels.Set, fields.Set, error) {
 
 // MatchPod returns a generic matcher for a given label and field selector.
 func MatchPod(label labels.Selector, field fields.Selector) storage.SelectionPredicate {
-	var indexFields = []string{"spec.nodeName"}
-	if utilfeature.DefaultFeatureGate.Enabled(features.StorageNamespaceIndex) && !utilfeature.DefaultFeatureGate.Enabled(apiserverfeatures.BtreeWatchCache) {
-		indexFields = append(indexFields, "metadata.namespace")
-	}
 	return storage.SelectionPredicate{
 		Label:       label,
 		Field:       field,
 		GetAttrs:    GetAttrs,
-		IndexFields: indexFields,
+		IndexFields: []string{"spec.nodeName"},
 	}
 }
 
@@ -478,24 +473,11 @@ func NodeNameIndexFunc(obj interface{}) ([]string, error) {
 	return []string{pod.Spec.NodeName}, nil
 }
 
-// NamespaceIndexFunc return value name of given object.
-func NamespaceIndexFunc(obj interface{}) ([]string, error) {
-	pod, ok := obj.(*api.Pod)
-	if !ok {
-		return nil, fmt.Errorf("not a pod")
-	}
-	return []string{pod.Namespace}, nil
-}
-
 // Indexers returns the indexers for pod storage.
 func Indexers() *cache.Indexers {
-	var indexers = cache.Indexers{
+	return &cache.Indexers{
 		storage.FieldIndex("spec.nodeName"): NodeNameIndexFunc,
 	}
-	if utilfeature.DefaultFeatureGate.Enabled(features.StorageNamespaceIndex) && !utilfeature.DefaultFeatureGate.Enabled(apiserverfeatures.BtreeWatchCache) {
-		indexers[storage.FieldIndex("metadata.namespace")] = NamespaceIndexFunc
-	}
-	return &indexers
 }
 
 // ToSelectableFields returns a field set that represents the object
@@ -510,12 +492,7 @@ func ToSelectableFields(pod *api.Pod) fields.Set {
 	podSpecificFieldsSet["spec.restartPolicy"] = string(pod.Spec.RestartPolicy)
 	podSpecificFieldsSet["spec.schedulerName"] = string(pod.Spec.SchedulerName)
 	podSpecificFieldsSet["spec.serviceAccountName"] = string(pod.Spec.ServiceAccountName)
-	if pod.Spec.SecurityContext != nil {
-		podSpecificFieldsSet["spec.hostNetwork"] = strconv.FormatBool(pod.Spec.SecurityContext.HostNetwork)
-	} else {
-		// default to false
-		podSpecificFieldsSet["spec.hostNetwork"] = strconv.FormatBool(false)
-	}
+	podSpecificFieldsSet["spec.hostNetwork"] = strconv.FormatBool(pod.Spec.HostNetwork)
 	podSpecificFieldsSet["status.phase"] = string(pod.Status.Phase)
 	// TODO: add podIPs as a downward API value(s) with proper format
 	podIP := ""

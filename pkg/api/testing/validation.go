@@ -19,16 +19,18 @@ package testing
 import (
 	"bytes"
 	"context"
+	"reflect"
 	"sort"
 	"strconv"
 	"testing"
 
-	"k8s.io/apimachinery/pkg/api/operation"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	runtimetest "k8s.io/apimachinery/pkg/runtime/testing"
+	"k8s.io/apimachinery/pkg/test/coverage"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/apimachinery/pkg/util/version"
+	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/features"
 	"k8s.io/apiserver/pkg/registry/rest"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
@@ -53,6 +55,12 @@ func VerifyVersionedValidationEquivalence(t *testing.T, obj, old runtime.Object,
 	// Accumulate errors from all versioned validation, per version.
 	all := map[string]field.ErrorList{}
 	accumulate := func(t *testing.T, gv string, errs field.ErrorList) {
+		// Skip versions explicitly excluded from the equivalence sweep (e.g. a
+		// deprecated, unserved group whose types are intentionally not validated
+		// declaratively).
+		if opts.SkipGroupVersions.Has(gv) {
+			return
+		}
 		// If normalization rules are provided, apply them to the field paths of generated errors.
 		// This allows comparing errors between API versions that have structural differences
 		// (e.g. flattened vs nested fields).
@@ -218,15 +226,15 @@ type validationOption struct {
 	// to the versioned object fails.
 	IgnoreObjectConversionErrors bool
 
-	// MinEmulationVersion is the minimum emulation version that can be used in the
-	// "hand written validation" sub-test. When the test has already enabled a feature
-	// gate introduced after 1.35 (e.g. in 1.36+), setting the emulation version to
-	// 1.35 would fail because the feature gate did not exist at that version.
-	// If set to a version greater than 1.35, the sub-test is skipped.
-	MinEmulationVersion *version.Version
-
 	// Fuzzer is the fuzzer to use for generating test objects.
 	Fuzzer *randfill.Filler
+
+	// SkipGroupVersions lists "group/version" strings to exclude from the
+	// versioned validation equivalence sweep. This is for kinds whose internal
+	// type is registered under a deprecated, unserved group (e.g. a workload
+	// type that also exists in extensions/v1beta1) for which declarative
+	// validation is intentionally not generated.
+	SkipGroupVersions sets.Set[string]
 }
 
 func WithSubResources(subResources ...string) ValidationTestConfig {
@@ -253,32 +261,29 @@ func WithFuzzer(fuzzer *randfill.Filler) ValidationTestConfig {
 	}
 }
 
-// WithMinEmulationVersion sets the minimum emulation version that can be used in the
-// "hand written validation" sub-test. Use this when the test has already enabled a
-// feature gate that was introduced after 1.35, which would cause the emulation version
-// downgrade to 1.35 to fail.
-func WithMinEmulationVersion(v *version.Version) ValidationTestConfig {
+// WithSkipGroupVersions excludes the given "group/version" strings from the
+// versioned validation equivalence sweep. Use it for kinds whose internal type
+// is also registered under a deprecated, unserved group (e.g. extensions/v1beta1)
+// for which declarative validation is intentionally not generated.
+func WithSkipGroupVersions(groupVersions ...string) ValidationTestConfig {
 	return func(o *validationOption) {
-		o.MinEmulationVersion = v
+		o.SkipGroupVersions = sets.New(groupVersions...)
 	}
 }
 
 // VerifyValidationEquivalence provides a helper for testing the migration from
 // hand-written imperative validation to declarative validation. It ensures that
-// the validation logic remains consistent before and after the feature is enabled.
+// the validation logic remains consistent across enforcement modes.
 //
-// The function operates by running the provided validation function under four scenarios:
+// The function operates by running the provided validation function under three scenarios:
 //  1. With DeclarativeValidation and DeclarativeValidationBeta feature gates enabled,
 //     using the new declarative validation rules (Beta stage).
 //  2. With DeclarativeValidation enabled and DeclarativeValidationBeta disabled,
 //     using the new declarative validation rules (Standard stage).
-//  3. With DeclarativeValidation and DeclarativeValidationTakeover feature gates disabled,
-//     simulating the legacy hand-written validation.
-//  4. With all declarative rules enforced (including Alpha), ensuring that the full set of
+//  3. With all declarative rules enforced (including Alpha), ensuring that the full set of
 //     declarative validations is correctly implemented (testing only).
 //
-// It then asserts that the validation errors produced in all scenarios are equivalent,
-// guaranteeing a safe migration. It also checks the errors against an expected set.
+// It checks the errors against an expected set in each scenario.
 // It compares errors by field, origin and type; all three should match to be called equivalent.
 // It also make sure all versions of the given API returns equivalent errors.
 func VerifyValidationEquivalence(t *testing.T, ctx context.Context, obj runtime.Object, strategy rest.RESTCreateStrategy, expectedErrs field.ErrorList, testConfigs ...ValidationTestConfig) {
@@ -289,31 +294,24 @@ func VerifyValidationEquivalence(t *testing.T, ctx context.Context, obj runtime.
 	}
 
 	verifyValidationEquivalence(t, expectedErrs, func(c context.Context) field.ErrorList {
-		errs := strategy.Validate(c, obj)
-		if dv, ok := strategy.(rest.DeclarativeValidationStrategy); ok {
-			errs = dv.ValidateDeclaratively(c, obj, nil, errs, operation.Create, dv.DeclarativeValidationConfig(c, obj, nil))
-		}
-		return errs
-	}, ctx, opts)
+		return rest.ValidateCreate(c, obj, strategy)
+	}, ctx, opts, obj)
 	VerifyVersionedValidationEquivalence(t, obj, nil, testConfigs...)
 }
 
 // VerifyUpdateValidationEquivalence provides a helper for testing the migration from
 // hand-written imperative validation to declarative validation for update operations.
-// It ensures that the validation logic remains consistent before and after the feature is enabled.
+// It ensures that the validation logic remains consistent across enforcement modes.
 //
-// The function operates by running the provided validation function under four scenarios:
+// The function operates by running the provided validation function under three scenarios:
 //  1. With DeclarativeValidation and DeclarativeValidationBeta feature gates enabled,
 //     using the new declarative validation rules (Beta stage).
 //  2. With DeclarativeValidation enabled and DeclarativeValidationBeta disabled,
 //     using the new declarative validation rules (Standard stage).
-//  3. With DeclarativeValidation and DeclarativeValidationTakeover feature gates disabled,
-//     simulating the legacy hand-written validation.
-//  4. With all declarative rules enforced (including Alpha), ensuring that the full set of
+//  3. With all declarative rules enforced (including Alpha), ensuring that the full set of
 //     declarative validations is correctly implemented (testing only).
 //
-// It then asserts that the validation errors produced in all scenarios are equivalent,
-// guaranteeing a safe migration. It also checks the errors against an expected set.
+// It checks the errors against an expected set in each scenario.
 // It compares errors by field, origin and type; all three should match to be called equivalent.
 // It also make sure all versions of the given API returns equivalent errors.
 func VerifyUpdateValidationEquivalence(t *testing.T, ctx context.Context, obj, old runtime.Object, strategy rest.RESTUpdateStrategy, expectedErrs field.ErrorList, testConfigs ...ValidationTestConfig) {
@@ -324,21 +322,48 @@ func VerifyUpdateValidationEquivalence(t *testing.T, ctx context.Context, obj, o
 	}
 
 	verifyValidationEquivalence(t, expectedErrs, func(c context.Context) field.ErrorList {
-		errs := strategy.ValidateUpdate(c, obj, old)
-		if dv, ok := strategy.(rest.DeclarativeValidationStrategy); ok {
-			errs = dv.ValidateDeclaratively(c, obj, old, errs, operation.Update, dv.DeclarativeValidationConfig(c, obj, old))
-		}
-		return errs
-	}, ctx, opts)
+		return rest.ValidateUpdate(c, obj, old, strategy)
+	}, ctx, opts, obj)
 	VerifyVersionedValidationEquivalence(t, obj, old, testConfigs...)
 }
 
-// verifyValidationEquivalence is a generic helper that verifies validation equivalence with and without declarative validation.
-func verifyValidationEquivalence(t *testing.T, expectedErrs field.ErrorList, runValidations func(context.Context) field.ErrorList, ctx context.Context, opt *validationOption) {
+// VerifyValidationEquivalenceFunc is a variant of VerifyValidationEquivalence
+// for callers that produce handwritten and declarative validation errors directly, rather
+// than through a RESTCreateStrategy. The validate closure should return the combined
+// ErrorList for (ctx, obj).
+func VerifyValidationEquivalenceFunc(t *testing.T, ctx context.Context, obj runtime.Object, validate func(ctx context.Context, obj runtime.Object) field.ErrorList, expectedErrs field.ErrorList, testConfigs ...ValidationTestConfig) {
 	t.Helper()
-	var declarativeBetaEnabledErrs field.ErrorList
-	var declarativeBetaDisabledErrs field.ErrorList
-	var imperativeErrs field.ErrorList
+	opts := &validationOption{}
+	for _, testcfg := range testConfigs {
+		testcfg(opts)
+	}
+
+	verifyValidationEquivalence(t, expectedErrs, func(c context.Context) field.ErrorList {
+		return validate(c, obj)
+	}, ctx, opts, obj)
+	VerifyVersionedValidationEquivalence(t, obj, nil, testConfigs...)
+}
+
+// VerifyUpdateValidationEquivalenceFunc is a variant of VerifyUpdateValidationEquivalence
+// for callers that produce handwritten and declarative validation errors directly, rather
+// than through a RESTUpdateStrategy. The validate closure should return the combined
+// ErrorList for (ctx, obj, old).
+func VerifyUpdateValidationEquivalenceFunc(t *testing.T, ctx context.Context, obj, old runtime.Object, validate func(ctx context.Context, obj, old runtime.Object) field.ErrorList, expectedErrs field.ErrorList, testConfigs ...ValidationTestConfig) {
+	t.Helper()
+	opts := &validationOption{}
+	for _, testcfg := range testConfigs {
+		testcfg(opts)
+	}
+
+	verifyValidationEquivalence(t, expectedErrs, func(c context.Context) field.ErrorList {
+		return validate(c, obj, old)
+	}, ctx, opts, obj)
+	VerifyVersionedValidationEquivalence(t, obj, old, testConfigs...)
+}
+
+// verifyValidationEquivalence is a generic helper that verifies validation equivalence across declarative enforcement modes.
+func verifyValidationEquivalence(t *testing.T, expectedErrs field.ErrorList, runValidations func(context.Context) field.ErrorList, ctx context.Context, opt *validationOption, obj runtime.Object) {
+	t.Helper()
 
 	// Reset metrics to ensure a clean state for mismatch checking
 	legacyregistry.Reset()
@@ -354,12 +379,12 @@ func verifyValidationEquivalence(t *testing.T, expectedErrs field.ErrorList, run
 			features.DeclarativeValidation:     true,
 			features.DeclarativeValidationBeta: true,
 		})
-		declarativeBetaEnabledErrs = runValidations(ctx)
+		errs := runValidations(ctx)
 
 		if len(expectedErrs) > 0 {
-			errOutputMatcher.Test(t, expectedErrs, declarativeBetaEnabledErrs)
-		} else if len(declarativeBetaEnabledErrs) != 0 {
-			t.Errorf("expected no errors, but got: %v", declarativeBetaEnabledErrs)
+			errOutputMatcher.Test(t, expectedErrs, errs)
+		} else if len(errs) != 0 {
+			t.Errorf("expected no errors, but got: %v", errs)
 		}
 
 		// Ensure no mismatches were logged/metrics incremented
@@ -373,43 +398,19 @@ func verifyValidationEquivalence(t *testing.T, expectedErrs field.ErrorList, run
 			features.DeclarativeValidation:     true,
 			features.DeclarativeValidationBeta: false,
 		})
-		declarativeBetaDisabledErrs = runValidations(ctx)
+		errs := runValidations(ctx)
 
 		if len(expectedErrs) > 0 {
-			errOutputMatcher.Test(t, expectedErrs, declarativeBetaDisabledErrs)
-		} else if len(declarativeBetaDisabledErrs) != 0 {
-			t.Errorf("expected no errors, but got: %v", declarativeBetaDisabledErrs)
+			errOutputMatcher.Test(t, expectedErrs, errs)
+		} else if len(errs) != 0 {
+			t.Errorf("expected no errors, but got: %v", errs)
 		}
 
 		// Ensure no mismatches were logged/metrics incremented
 		testutil.AssertVectorCount(t, "apiserver_validation_declarative_validation_mismatch_total", nil, 0)
 	})
-	// 3. Legacy Hand Written Validation
-	// TODO: Remove this test case in 1.39 when emulation for 1.35 is no longer needed.
-	emulationVersion := version.MustParse("1.35")
-	skipHandWritten := opt.MinEmulationVersion != nil && opt.MinEmulationVersion.GreaterThan(emulationVersion)
-	t.Run("hand written validation", func(t *testing.T) {
-		if skipHandWritten {
-			t.Skipf("skipping: minimum emulation version %s is greater than %s", opt.MinEmulationVersion, emulationVersion)
-		}
-		// Even when DeclarativeValidation gate is disabled, if the object's strategy has explicit
-		// declarative enforcement enabled, Standard declarative validations still run and are enforced.
-		// Emulating 1.35 ensures the DeclarativeValidationBeta gate is also effectively disabled (evaluated as false)
-		// because the feature gate was not introduced until 1.36.
-		featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, emulationVersion)
-		featuregatetesting.SetFeatureGatesDuringTest(t, utilfeature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
-			features.DeclarativeValidation: false,
-		})
-		imperativeErrs = runValidations(ctx)
 
-		if len(expectedErrs) > 0 {
-			errOutputMatcher.Test(t, expectedErrs, imperativeErrs)
-		} else if len(imperativeErrs) != 0 {
-			t.Errorf("expected no errors, but got: %v", imperativeErrs)
-		}
-	})
-
-	// 4. Declarative Validation with All Rules Enforced (Testing Only)
+	// 3. Declarative Validation with All Rules Enforced (Testing Only)
 	// This sub-test ensures that all declarative validation rules (including those marked as Alpha)
 	// are correctly implemented and match the expected errors. It uses a special context
 	// to force enforcement of all declarative rules and filter out their handwritten counterparts.
@@ -423,6 +424,11 @@ func verifyValidationEquivalence(t *testing.T, expectedErrs field.ErrorList, run
 		})
 		testCtx := rest.WithAllDeclarativeEnforcedForTest(ctx)
 		allDeclarativeErrs := runValidations(testCtx)
+
+		// Record the declarative-validation rules observed in this subtest so
+		// AssertDeclarativeCoverage (in TestMain) can confirm every declared
+		// rule was exercised by at least one test case.
+		recordObservedRules(testCtx, obj, allDeclarativeErrs)
 
 		// In this mode, strategy.go validation remove all hand written validations errors which are marked covered by declarative validations.
 		// so we have to filter out errors which are filtered out by strategy.go.
@@ -446,47 +452,20 @@ func verifyValidationEquivalence(t *testing.T, expectedErrs field.ErrorList, run
 		// Ensure no mismatches were logged/metrics incremented
 		testutil.AssertVectorCount(t, "apiserver_validation_declarative_validation_mismatch_total", nil, 0)
 	})
-
-	if t.Failed() {
-		// There is no point in moving forward, if any of above tests failed for any reason. Running follow up tests will return noise.
-		t.SkipNow()
-	}
-
-	// The equivalenceMatcher is used to verify that the output errors from hand-written imperative validation
-	// are equivalent to the output errors in all declarative validation scenarios (Beta enabled/disabled).
-	// This ensures that enabling the feature gates does not change the validation outcome.
-	equivalenceMatcher := field.ErrorMatcher{}.ByType().ByOrigin()
-	if len(opt.NormalizationRules) > 0 {
-		equivalenceMatcher = equivalenceMatcher.ByFieldNormalized(opt.NormalizationRules)
-	} else {
-		equivalenceMatcher = equivalenceMatcher.ByField()
-	}
-
-	if !skipHandWritten {
-		// The imperative validation may produce duplicate errors, which is not supported by the ErrorMatcher.
-		// TODO: remove this once ErrorMatcher has been extended to handle this form of deduplication.
-		imperativeErrs = deDuplicateErrors(imperativeErrs, equivalenceMatcher)
-
-		// Verify equivalence across all scenarios
-		equivalenceMatcher.Test(t, imperativeErrs, declarativeBetaEnabledErrs)
-		equivalenceMatcher.Test(t, imperativeErrs, declarativeBetaDisabledErrs)
-	}
 }
 
-// deDuplicateErrors removes duplicate errors from an ErrorList based on the provided matcher.
-func deDuplicateErrors(errs field.ErrorList, matcher field.ErrorMatcher) field.ErrorList {
-	var deduped field.ErrorList
-	for _, err := range errs {
-		found := false
-		for _, existingErr := range deduped {
-			if matcher.Matches(existingErr, err) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			deduped = append(deduped, err)
-		}
+// recordObservedRules extracts the GVK for obj (preferring the scheme's
+// canonical Kind, falling back to the Go type name) and forwards every error
+// to coverage.RecordObservedRules.
+func recordObservedRules(ctx context.Context, obj runtime.Object, errs field.ErrorList) {
+	info, ok := genericapirequest.RequestInfoFrom(ctx)
+	if !ok {
+		return
 	}
-	return deduped
+	kind := reflect.TypeOf(obj).Elem().Name()
+	if gvks, _, err := legacyscheme.Scheme.ObjectKinds(obj); err == nil && len(gvks) > 0 {
+		kind = gvks[0].Kind
+	}
+	gvk := schema.GroupVersionKind{Group: info.APIGroup, Version: info.APIVersion, Kind: kind}
+	coverage.RecordObservedRules(gvk, errs)
 }

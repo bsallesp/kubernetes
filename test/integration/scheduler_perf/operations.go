@@ -35,7 +35,6 @@ import (
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/restmapper"
 	"k8s.io/klog/v2"
-	testutils "k8s.io/kubernetes/test/utils"
 	"k8s.io/kubernetes/test/utils/client-go/ktesting"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
@@ -215,9 +214,9 @@ type createNodesOp struct {
 	// At most one of the following strategies can be defined. Defaults
 	// to TrivialNodePrepareStrategy if unspecified.
 	// Optional
-	NodeAllocatableStrategy  *testutils.NodeAllocatableStrategy
-	LabelNodePrepareStrategy *testutils.LabelNodePrepareStrategy
-	UniqueNodeLabelStrategy  *testutils.UniqueNodeLabelStrategy
+	NodeAllocatableStrategy  *NodeAllocatableStrategy
+	LabelNodePrepareStrategy *LabelNodePrepareStrategy
+	UniqueNodeLabelStrategy  *UniqueNodeLabelStrategy
 	// Params to be passed to the template.
 	// Values with `$` prefix will be resolved to the workload parameters.
 	TemplateParams map[string]any
@@ -299,6 +298,10 @@ type createPodsOp struct {
 	Count int
 	// Template parameter for Count.
 	CountParam string
+	// Template parameter for multiplying CountParam. It is used when total number of pods
+	// is defined by number of pods per podgroup for multiple podgroups.
+	// Optional.
+	CountMultiplierParam string
 	// If false, Count pods get created rapidly. This can be used to
 	// measure how quickly the scheduler can fill up a cluster.
 	//
@@ -345,11 +348,24 @@ type createPodsOp struct {
 	// Params to be passed to the template.
 	// Values with `$` prefix will be resolved to the workload parameters.
 	TemplateParams map[string]any
+	// SignatureBatchSize defines how many subsequent pods have the same "signature" label.
+	// If positive, every SignatureBatchSize pods will have a "signature" label with value "signature-label-<index/batchSize>".
+	// If not specified, it defaults to 1 (each pod has a unique signature).
+	// Optional
+	SignatureBatchSize int
+	// Template parameter for SignatureBatchSize.
+	SignatureBatchSizeParam string
 }
 
 func (cpo *createPodsOp) isValid(allowParameterization bool) error {
+	if !isValidCount(allowParameterization, cpo.SignatureBatchSize, cpo.SignatureBatchSizeParam) {
+		return fmt.Errorf("invalid SignatureBatchSize=%d / SignatureBatchSizeParam=%q", cpo.SignatureBatchSize, cpo.SignatureBatchSizeParam)
+	}
 	if !isValidCount(allowParameterization, cpo.Count, cpo.CountParam) {
 		return fmt.Errorf("invalid Count=%d / CountParam=%q", cpo.Count, cpo.CountParam)
+	}
+	if cpo.CountMultiplierParam != "" && !isValidParameterizable(cpo.CountMultiplierParam) {
+		return fmt.Errorf("invalid CountMultiplierParam=%q", cpo.CountMultiplierParam)
 	}
 	if cpo.CollectMetrics && cpo.SkipWaitToCompletion {
 		// While it's technically possible to achieve this, the additional
@@ -377,6 +393,24 @@ func (cpo createPodsOp) patchParams(w *Workload) (realOp, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+	if cpo.CountMultiplierParam != "" {
+		multiplier, err := w.Params.get(cpo.CountMultiplierParam[1:])
+		if err != nil {
+			return nil, err
+		}
+		cpo.Count *= multiplier
+	}
+	if cpo.SignatureBatchSizeParam != "" {
+		paramKey := cpo.SignatureBatchSizeParam[1:]
+		signatureBatchSize, err := w.Params.get(paramKey)
+		if err != nil {
+			return nil, err
+		}
+		cpo.SignatureBatchSize = signatureBatchSize
+	}
+	if cpo.SignatureBatchSize == 0 {
+		cpo.SignatureBatchSize = 1
 	}
 	if cpo.DurationParam != "" {
 		durationStr, err := getParam[string](w.Params, cpo.DurationParam[1:])
@@ -602,6 +636,61 @@ func (so sleepOp) patchParams(w *Workload) (realOp, error) {
 	return &so, nil
 }
 
+// createPodGroups defines an op where PodGroups get created from a YAML template
+// then waits for them to be visible in the scheduler's informer cache.
+type createPodGroups struct {
+	// Must match createPodGroupsOpcode.
+	Opcode operationCode
+	// Namespace the objects should be created in.
+	Namespace string
+	// Path to spec file describing the PodGroup to create.
+	TemplatePath string
+	// Params to be passed to the template.
+	TemplateParams map[string]any
+	// Count determines how many PodGroups get created.
+	Count int
+	// CountParam is the name of the parameter that determines the count.
+	CountParam string
+}
+
+func (cpg *createPodGroups) isValid(allowParameterization bool) error {
+	if cpg.TemplatePath == "" {
+		return fmt.Errorf("templatePath must be set")
+	}
+	if cpg.Namespace == "" {
+		return fmt.Errorf("namespace must be set")
+	}
+	if !isValidCount(allowParameterization, cpg.Count, cpg.CountParam) {
+		return fmt.Errorf("invalid Count=%d / CountParam=%q", cpg.Count, cpg.CountParam)
+	}
+	if !allowParameterization && cpg.Count < 1 {
+		return fmt.Errorf("count must be greater than 0, got %d", cpg.Count)
+	}
+	return nil
+}
+
+func (cpg *createPodGroups) collectsMetrics() bool {
+	return false
+}
+
+func (cpg createPodGroups) patchParams(w *Workload) (realOp, error) {
+	if cpg.CountParam != "" {
+		count, err := w.Params.get(cpg.CountParam[1:])
+		if err != nil {
+			return nil, err
+		}
+		cpg.Count = count
+	}
+	if len(cpg.TemplateParams) > 0 {
+		var err error
+		cpg.TemplateParams, err = resolveTemplateParams(cpg.TemplateParams, w)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &cpg, cpg.isValid(false)
+}
+
 // startCollectingMetricsOp defines an op that starts metrics collectors.
 // stopCollectingMetricsOp has to be used after this op to finish collecting.
 type startCollectingMetricsOp struct {
@@ -650,6 +739,59 @@ func (*stopCollectingMetricsOp) collectsMetrics() bool {
 
 func (scm stopCollectingMetricsOp) patchParams(_ *Workload) (realOp, error) {
 	return &scm, nil
+}
+
+// startCollectingProfileOp defines an op that starts profile collection.
+// stopCollectingProfileOp has to be used after this op to finish collecting.
+type startCollectingProfileOp struct {
+	// Must be "startCollectingProfile".
+	Opcode operationCode
+	// Type is the profile type to collect (currently only "CPU" is supported).
+	Type string
+	// FilePath is the path to the output profile file. If dataItemsDir is set,
+	// the file will be created relative to dataItemsDir.
+	FilePath string
+}
+
+func (scp *startCollectingProfileOp) isValid(_ bool) error {
+	if scp.FilePath == "" {
+		return fmt.Errorf("filePath cannot be empty")
+	}
+	if strings.ToUpper(scp.Type) != "CPU" {
+		return fmt.Errorf("only CPU profile type is supported, got %q", scp.Type)
+	}
+	return nil
+}
+
+func (*startCollectingProfileOp) collectsMetrics() bool {
+	return false
+}
+
+func (scp startCollectingProfileOp) patchParams(_ *Workload) (realOp, error) {
+	return &scp, nil
+}
+
+// stopCollectingProfileOp defines an op that stops profile collection.
+type stopCollectingProfileOp struct {
+	// Must be "stopCollectingProfile".
+	Opcode operationCode
+	// Type is the profile type to stop (currently only "CPU" is supported).
+	Type string
+}
+
+func (scp *stopCollectingProfileOp) isValid(_ bool) error {
+	if strings.ToUpper(scp.Type) != "CPU" {
+		return fmt.Errorf("only CPU profile type is supported, got %q", scp.Type)
+	}
+	return nil
+}
+
+func (*stopCollectingProfileOp) collectsMetrics() bool {
+	return false
+}
+
+func (scp stopCollectingProfileOp) patchParams(_ *Workload) (realOp, error) {
+	return &scp, nil
 }
 
 // resolveTemplateParams resolves the template parameters using the workload parameters.

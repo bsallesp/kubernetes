@@ -29,13 +29,14 @@ import (
 	v1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	resourcebetaapi "k8s.io/api/resource/v1beta2"
-	schedulingapi "k8s.io/api/scheduling/v1alpha2"
+	schedulingapi "k8s.io/api/scheduling/v1alpha3"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/version"
+	"k8s.io/apimachinery/pkg/util/wait"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	dyfake "k8s.io/client-go/dynamic/fake"
@@ -182,13 +183,14 @@ func TestEventHandlers_MoveToActiveOnNominatedNodeUpdate(t *testing.T) {
 			// Put test pods into unschedulable queue
 			for _, pod := range unschedulablePods {
 				queue.Add(ctx, pod)
-				poppedPod, err := queue.Pop(logger)
+				entity, err := queue.Pop(logger)
 				if err != nil {
 					t.Fatalf("Pop failed: %v", err)
 				}
+				poppedPod := entity.(*framework.QueuedPodInfo)
 				poppedPod.UnschedulablePlugins = sets.New("fooPlugin1")
-				if err := queue.AddUnschedulableIfNotPresent(logger, poppedPod, queue.SchedulingCycle()); err != nil {
-					t.Errorf("Unexpected error from AddUnschedulableIfNotPresent: %v", err)
+				if err := queue.AddUnschedulablePodIfNotPresent(logger, poppedPod, queue.SchedulingCycle()); err != nil {
+					t.Errorf("Unexpected error from AddUnschedulablePodIfNotPresent: %v", err)
 				}
 			}
 
@@ -464,6 +466,9 @@ func TestAddAllEventHandlers(t *testing.T) {
 			if !tt.enableDRA {
 				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.34"))
 			} else {
+				if !tt.enableDRAExtendedResource {
+					featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.36"))
+				}
 				// Making this depend on the emulated version avoids "cannot set feature gate DRADeviceTaintRules to false, feature is PreAlpha at emulated version 1.34".
 				overrides[features.DRADeviceTaintRules] = tt.enableDRADeviceTaintRules
 				overrides[features.GenericWorkload] = tt.enableGenericWorkload
@@ -646,6 +651,9 @@ func TestAdmissionCheck(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if !tt.enableDRAExtendedResource {
+				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.36"))
+			}
 			featuregatetesting.SetFeatureGatesDuringTest(t, utilfeature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
 				features.DRAExtendedResource:         tt.enableDRAExtendedResource,
 				features.DRANodeAllocatableResources: tt.enableDRANodeAllocatableResources,
@@ -730,7 +738,7 @@ func TestAddPod(t *testing.T) {
 
 			sched.addPod(tt.pod)
 
-			_, ok := sched.SchedulingQueue.GetPod(tt.pod.Name, tt.pod.Namespace)
+			_, ok := sched.SchedulingQueue.GetPod(tt.pod.Name, tt.pod.Namespace, tt.pod.Spec.SchedulingGroup)
 			if tt.expectInQueue && !ok {
 				t.Errorf("Expected pod to be in scheduling queue")
 			} else if !tt.expectInQueue && ok {
@@ -793,6 +801,7 @@ func TestUpdatePod(t *testing.T) {
 	scheduledPodGroupMember := st.MakePod().Name("pod1").Namespace("ns1").UID("pgpod1").Node("node1").SchedulerName("supported-scheduler").PodGroupName("pg1").Obj()
 	scheduledPodGroupMemberWithLabels := st.MakePod().Name("pod1").Namespace("ns1").UID("pgpod1").Labels(map[string]string{"foo": "bar"}).ResourceVersion("2").Node("node1").SchedulerName("supported-scheduler").PodGroupName("pg1").Obj()
 	scheduledPodGroupMemberWithOtherNode := st.MakePod().Name("pod1").Namespace("ns1").UID("pgpod1").Node("node2").SchedulerName("supported-scheduler").PodGroupName("pg1").Obj()
+	podGroupMemberWithDeletionTimestamp := st.MakePod().Name("pod1").Namespace("ns1").UID("pgpod1").Terminating().ResourceVersion("2").SchedulerName("supported-scheduler").PodGroupName("pg1").Obj()
 
 	tests := []struct {
 		name                             string
@@ -800,11 +809,13 @@ func TestUpdatePod(t *testing.T) {
 		assumedPod                       *v1.Pod
 		newPod                           *v1.Pod
 		genericWorkloadEnabled           bool
+		waitingOnPermit                  bool
 		expectInQueue                    *v1.Pod
 		expectInCache                    *v1.Pod
 		expectInPodGroupStateUnscheduled bool
 		expectInPodGroupStateAssumed     bool
 		expectInPodGroupStateAssigned    bool
+		expectPodGroupStateDeleted       bool
 	}{
 		{
 			name:          "update unscheduled pod",
@@ -844,9 +855,9 @@ func TestUpdatePod(t *testing.T) {
 		},
 		{
 			name:          "bind unscheduled pod with other scheduler name",
-			oldPod:        pod,
-			newPod:        scheduledPod,
-			expectInCache: scheduledPod,
+			oldPod:        otherPod,
+			newPod:        otherScheduledPod,
+			expectInCache: otherScheduledPod,
 		},
 		{
 			name:          "bind assumed pod",
@@ -863,10 +874,18 @@ func TestUpdatePod(t *testing.T) {
 			expectInCache: scheduledPodOtherNode,
 		},
 		{
-			name:       "delete assumed pod with deletion timestamp",
+			name:       "update assumed pod with deletion timestamp",
 			oldPod:     pod,
 			assumedPod: scheduledPod,
 			newPod:     podWithDeletionTimestamp,
+		},
+		{
+			name:            "update assumed pod waiting on permit with deletion timestamp",
+			oldPod:          pod,
+			assumedPod:      scheduledPod,
+			newPod:          podWithDeletionTimestamp,
+			waitingOnPermit: true,
+			expectInCache:   scheduledPod,
 		},
 		{
 			name:          "update pod group member with GenericWorkload disabled",
@@ -925,6 +944,24 @@ func TestUpdatePod(t *testing.T) {
 			genericWorkloadEnabled:        true,
 			expectInPodGroupStateAssigned: true,
 		},
+		{
+			name:                       "update assumed pod group member with deletion timestamp",
+			oldPod:                     unscheduledPodGroupMember,
+			assumedPod:                 scheduledPodGroupMember,
+			newPod:                     podGroupMemberWithDeletionTimestamp,
+			genericWorkloadEnabled:     true,
+			expectPodGroupStateDeleted: true,
+		},
+		{
+			name:                         "update assumed pod group member waiting on permit with deletion timestamp",
+			oldPod:                       unscheduledPodGroupMember,
+			assumedPod:                   scheduledPodGroupMember,
+			newPod:                       podGroupMemberWithDeletionTimestamp,
+			genericWorkloadEnabled:       true,
+			waitingOnPermit:              true,
+			expectInCache:                scheduledPodGroupMember,
+			expectInPodGroupStateAssumed: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -955,6 +992,7 @@ func TestUpdatePod(t *testing.T) {
 				},
 			}
 
+			var waitOnPermitDone chan struct{}
 			if tt.assumedPod != nil {
 				if tt.oldPod.Spec.SchedulingGroup != nil {
 					sched.Cache.AddPodGroupMember(tt.oldPod)
@@ -963,17 +1001,39 @@ func TestUpdatePod(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Failed to assume pod: %v", err)
 				}
+				if tt.waitingOnPermit {
+					waitOnPermitDone = make(chan struct{})
+					schedFramework.AddWaitingPod(tt.assumedPod, nil)
+					go func() {
+						defer close(waitOnPermitDone)
+						schedFramework.WaitOnPermit(ctx, tt.assumedPod)
+					}()
+				}
 			} else {
 				sched.addPod(tt.oldPod)
 			}
 
 			sched.updatePod(tt.oldPod, tt.newPod)
 
-			qPod, ok := sched.SchedulingQueue.GetPod(tt.newPod.Name, tt.newPod.Namespace)
+			if tt.waitingOnPermit {
+				err := wait.PollUntilContextTimeout(ctx, 10*time.Millisecond, 1*time.Second, true, func(ctx context.Context) (bool, error) {
+					return schedFramework.GetWaitingPod(tt.assumedPod.UID) == nil, nil
+				})
+				if err != nil {
+					t.Errorf("Expected pod %v to be removed from waiting pods", tt.assumedPod.UID)
+				}
+				select {
+				case <-waitOnPermitDone:
+				case <-time.After(wait.ForeverTestTimeout):
+					t.Fatalf("timeout on WaitOnPermit %v", tt.assumedPod.UID)
+				}
+			}
+
+			qPod, ok := sched.SchedulingQueue.GetPod(tt.newPod.Name, tt.newPod.Namespace, tt.newPod.Spec.SchedulingGroup)
 			if tt.expectInQueue != nil {
 				if !ok {
 					t.Errorf("Expected pod to be in scheduling queue")
-				} else if diff := cmp.Diff(tt.expectInQueue, qPod.Pod); diff != "" {
+				} else if diff := cmp.Diff(tt.expectInQueue, qPod.GetPod()); diff != "" {
 					t.Errorf("Unexpected pod after update (-want,+got):\n%s", diff)
 				}
 			} else if ok {
@@ -996,9 +1056,9 @@ func TestUpdatePod(t *testing.T) {
 			}
 			pgs, err := sched.Cache.PodGroupStates().Get(tt.oldPod.Namespace, *tt.oldPod.Spec.SchedulingGroup.PodGroupName)
 
-			if !tt.genericWorkloadEnabled {
+			if !tt.genericWorkloadEnabled || tt.expectPodGroupStateDeleted {
 				if err == nil {
-					t.Errorf("Expected no pod group state to exist when GenericWorkload is disabled, but found one")
+					t.Errorf("Expected pod group state to not exist, but it still exists")
 				}
 				return
 			}
@@ -1029,12 +1089,14 @@ func TestDeletePod(t *testing.T) {
 	scheduledPodGroupMember := st.MakePod().Name("pod1").Namespace("ns1").UID("pgpod1").Node("node1").SchedulerName("supported-scheduler").PodGroupName("pg1").Obj()
 
 	tests := []struct {
-		name                   string
-		initialPod             *v1.Pod
-		assumed                bool
-		waitingOnPermit        bool
-		podToDelete            any
-		genericWorkloadEnabled bool
+		name                         string
+		initialPod                   *v1.Pod
+		assumedPod                   *v1.Pod
+		waitingOnPermit              bool
+		podToDelete                  any
+		genericWorkloadEnabled       bool
+		expectInCache                bool
+		expectInPodGroupStateAssumed bool
 	}{
 		{
 			name:        "delete unscheduled pod",
@@ -1053,8 +1115,8 @@ func TestDeletePod(t *testing.T) {
 		},
 		{
 			name:        "delete assumed pod",
-			initialPod:  scheduledPod,
-			assumed:     true,
+			initialPod:  pod,
+			assumedPod:  scheduledPod,
 			podToDelete: pod,
 		},
 		{
@@ -1094,6 +1156,23 @@ func TestDeletePod(t *testing.T) {
 			podToDelete:            scheduledPodGroupMember,
 			genericWorkloadEnabled: true,
 		},
+		{
+			name:                   "delete an assumed pod group member",
+			initialPod:             podGroupMember,
+			assumedPod:             scheduledPodGroupMember,
+			podToDelete:            scheduledPodGroupMember,
+			genericWorkloadEnabled: true,
+		},
+		{
+			name:                         "delete an assumed pod group member waiting on permit",
+			initialPod:                   podGroupMember,
+			assumedPod:                   scheduledPodGroupMember,
+			podToDelete:                  podGroupMember,
+			genericWorkloadEnabled:       true,
+			waitingOnPermit:              true,
+			expectInCache:                true,
+			expectInPodGroupStateAssumed: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1124,10 +1203,22 @@ func TestDeletePod(t *testing.T) {
 				},
 			}
 
-			if tt.assumed {
-				err := sched.Cache.AssumePod(logger, tt.initialPod)
+			var waitOnPermitDone chan struct{}
+			if tt.assumedPod != nil {
+				if tt.initialPod.Spec.SchedulingGroup != nil {
+					sched.Cache.AddPodGroupMember(tt.initialPod)
+				}
+				err := sched.Cache.AssumePod(logger, tt.assumedPod)
 				if err != nil {
 					t.Fatalf("Failed to assume pod: %v", err)
+				}
+				if tt.waitingOnPermit {
+					waitOnPermitDone = make(chan struct{})
+					schedFramework.AddWaitingPod(tt.assumedPod, nil)
+					go func() {
+						defer close(waitOnPermitDone)
+						schedFramework.WaitOnPermit(ctx, tt.assumedPod)
+					}()
 				}
 			} else {
 				sched.addPod(tt.initialPod)
@@ -1135,11 +1226,30 @@ func TestDeletePod(t *testing.T) {
 
 			sched.deletePod(tt.podToDelete)
 
+			if tt.waitingOnPermit {
+				err := wait.PollUntilContextTimeout(ctx, 10*time.Millisecond, 1*time.Second, true, func(ctx context.Context) (bool, error) {
+					return schedFramework.GetWaitingPod(tt.assumedPod.UID) == nil, nil
+				})
+				if err != nil {
+					t.Errorf("Expected pod %v to be removed from waiting pods", tt.assumedPod.UID)
+				}
+
+				select {
+				case <-waitOnPermitDone:
+				case <-time.After(wait.ForeverTestTimeout):
+					t.Fatalf("timeout on WaitOnPermit %v", tt.assumedPod.UID)
+				}
+			}
+
 			_, err = sched.Cache.GetPod(tt.initialPod)
-			if err == nil {
+			if tt.expectInCache {
+				if err != nil {
+					t.Errorf("Expected pod to still be in cache: %v", err)
+				}
+			} else if err == nil {
 				t.Errorf("Unexpected pod in cache after removal")
 			}
-			_, ok := sched.SchedulingQueue.GetPod(tt.initialPod.Name, tt.initialPod.Namespace)
+			_, ok := sched.SchedulingQueue.GetPod(tt.initialPod.Name, tt.initialPod.Namespace, tt.initialPod.Spec.SchedulingGroup)
 			if ok {
 				t.Errorf("Unexpected pod in scheduling queue after removal")
 			}
@@ -1148,8 +1258,15 @@ func TestDeletePod(t *testing.T) {
 				// Pod has no pod group, so there is no pod group state to check, the test can complete.
 				return
 			}
-			_, err = sched.Cache.PodGroupStates().Get(tt.initialPod.Namespace, *tt.initialPod.Spec.SchedulingGroup.PodGroupName)
-			if err == nil {
+			pgs, err := sched.Cache.PodGroupStates().Get(tt.initialPod.Namespace, *tt.initialPod.Spec.SchedulingGroup.PodGroupName)
+			if tt.expectInPodGroupStateAssumed {
+				if err != nil {
+					t.Fatalf("Unexpected error getting pod group state: %v", err)
+				}
+				if inAssumed := pgs.AssumedPods().Has(tt.assumedPod.UID); !inAssumed {
+					t.Errorf("Expected pod to be in AssumedPods of PodGroupState")
+				}
+			} else if err == nil {
 				t.Errorf("Unexpected pod group state in cache after pod removal")
 			}
 		})

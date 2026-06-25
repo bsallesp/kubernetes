@@ -34,7 +34,7 @@ import (
 // SubjectAccessReview checks whether or not a user or group can perform an action.
 // +k8s:supportsSubresource="/status"
 type SubjectAccessReview struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:""`
 	// metadata is the standard list metadata.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
 	// +optional
@@ -61,7 +61,7 @@ type SubjectAccessReview struct {
 // to check whether they can perform an action
 // +k8s:supportsSubresource="/status"
 type SelfSubjectAccessReview struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:""`
 	// metadata is the standard list metadata.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
 	// +optional
@@ -87,7 +87,7 @@ type SelfSubjectAccessReview struct {
 // checking.
 // +k8s:supportsSubresource="/status"
 type LocalSubjectAccessReview struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:""`
 	// metadata is the standard list metadata.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
 	// +optional
@@ -151,9 +151,13 @@ type NonResourceAttributes struct {
 type SubjectAccessReviewSpec struct {
 	// resourceAttributes describes information for a resource access request
 	// +optional
+	// +k8s:alpha(since: "1.37")=+k8s:optional
+	// +k8s:alpha(since: "1.37")=+k8s:unionMember
 	ResourceAttributes *ResourceAttributes `json:"resourceAttributes,omitempty" protobuf:"bytes,1,opt,name=resourceAttributes"`
 	// nonResourceAttributes describes information for a non-resource access request
 	// +optional
+	// +k8s:alpha(since: "1.37")=+k8s:optional
+	// +k8s:alpha(since: "1.37")=+k8s:unionMember
 	NonResourceAttributes *NonResourceAttributes `json:"nonResourceAttributes,omitempty" protobuf:"bytes,2,opt,name=nonResourceAttributes"`
 
 	// user is the user you're testing for.
@@ -187,9 +191,13 @@ func (t ExtraValue) String() string {
 type SelfSubjectAccessReviewSpec struct {
 	// resourceAttributes describes information for a resource access request
 	// +optional
+	// +k8s:alpha(since: "1.37")=+k8s:optional
+	// +k8s:alpha(since: "1.37")=+k8s:unionMember
 	ResourceAttributes *ResourceAttributes `json:"resourceAttributes,omitempty" protobuf:"bytes,1,opt,name=resourceAttributes"`
 	// nonResourceAttributes describes information for a non-resource access request
 	// +optional
+	// +k8s:alpha(since: "1.37")=+k8s:optional
+	// +k8s:alpha(since: "1.37")=+k8s:unionMember
 	NonResourceAttributes *NonResourceAttributes `json:"nonResourceAttributes,omitempty" protobuf:"bytes,2,opt,name=nonResourceAttributes"`
 }
 
@@ -229,7 +237,7 @@ type SubjectAccessReviewStatus struct {
 // SubjectAccessReview, and LocalAccessReview are the correct way to defer authorization decisions to the API server.
 // +k8s:supportsSubresource="/status"
 type SelfSubjectRulesReview struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:""`
 	// metadata is the standard list metadata.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
 	// +optional

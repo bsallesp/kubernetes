@@ -68,7 +68,7 @@ const (
 // Job represents the configuration of a single job.
 // +k8s:supportsSubresource="/status"
 type Job struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:""`
 	// Standard object's metadata.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
 	// +optional
@@ -90,7 +90,7 @@ type Job struct {
 
 // JobList is a collection of jobs.
 type JobList struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:""`
 	// Standard list metadata.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
 	// +optional
@@ -372,6 +372,8 @@ type JobSpec struct {
 	// It can be null or up to completions. It is required and must be
 	// less than or equal to 10^4 when is completions greater than 10^5.
 	// +optional
+	// +k8s:optional
+	// +k8s:alpha(since: "1.37")=+k8s:dependentRequired("backoffLimitPerIndex")
 	MaxFailedIndexes *int32 `json:"maxFailedIndexes,omitempty" protobuf:"varint,13,opt,name=maxFailedIndexes"`
 
 	// TODO enabled it when https://github.com/kubernetes/kubernetes/issues/28486 has been fixed
@@ -675,7 +677,7 @@ type JobTemplateSpec struct {
 // CronJob represents the configuration of a single cron job.
 // +k8s:supportsSubresource="/status"
 type CronJob struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:""`
 	// Standard object's metadata.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
 	// +optional
@@ -697,7 +699,7 @@ type CronJob struct {
 
 // CronJobList is a collection of cron jobs.
 type CronJobList struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:""`
 
 	// Standard list metadata.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata

@@ -84,7 +84,7 @@ type GroupResource struct {
 
 // KubeControllerManagerConfiguration contains elements describing kube-controller manager.
 type KubeControllerManagerConfiguration struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta `json:""`
 
 	// Generic holds configuration for a generic controller-manager
 	Generic cmconfigv1alpha1.GenericControllerManagerConfiguration
@@ -417,6 +417,8 @@ type NodeLifecycleControllerConfiguration struct {
 	// Zone is treated as unhealthy in nodeEvictionRate and secondaryNodeEvictionRate when at least
 	// unhealthyZoneThreshold (no less than 3) of Nodes in the zone are NotReady
 	UnhealthyZoneThreshold float32
+	// NodeMonitorPeriod is the period for syncing NodeStatus in NodeLifecycleController.
+	NodeMonitorPeriod metav1.Duration
 }
 
 // PersistentVolumeBinderControllerConfiguration contains elements describing
